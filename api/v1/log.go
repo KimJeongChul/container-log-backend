@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"container-log-backend/model"
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -16,17 +15,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
 type LogSocketAPI struct {
 	DockerClient *client.Client
 }
 
 func (api *LogSocketAPI) LogContainer(c *gin.Context) {
 	containerID := c.Param("container_id")
+	log.Println("container_id: ", containerID)
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true // CORS 설정, 모든 오리진 허용
+			return true
 		},
 	}
 
@@ -37,42 +36,66 @@ func (api *LogSocketAPI) LogContainer(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// Connection timeout
+	conn.SetReadLimit(maxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	// Ping period
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+
 	_, err = api.DockerClient.ContainerInspect(context.Background(), containerID)
 	if err != nil {
-		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Container with ID '%s' not found.", containerID)))
+		log.Printf("Error inspecting from container: %v\n", err)
 		return
 	}
-
 	now := time.Now()
 	lastTimestamp := now.Unix()
-	log.Println("lastTimestamp:", now)
-	for {
-		reader, err := api.DockerClient.ContainerLogs(context.Background(), containerID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true, Since: strconv.FormatInt(lastTimestamp, 10)})
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			continue
-		}
 
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			line := scanner.Text()
-			resMsg := model.ResMsg{
-				Msg: line,
+	// Get Docker Logstream
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logOptions := container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true, Since: strconv.FormatInt(lastTimestamp, 10)}
+
+	logStream, err := api.DockerClient.ContainerLogs(ctx, containerID, logOptions)
+	if err != nil {
+		log.Printf("Error fetching logs from container: %v\n", err)
+		return
+	}
+	defer logStream.Close()
+
+	scanner := bufio.NewScanner(logStream)
+	for scanner.Scan() {
+		select {
+		case <-ticker.C:
+			// Sned ping message
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Ping failed: %v\n", err)
+				return
 			}
+		default:
+			// Send log message
+			logLine := scanner.Text()
+			resMsg := model.Msg{
+				Msg: logLine,
+			}
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := conn.WriteJSON(resMsg); err != nil {
 				log.Println("Error sending message:", err)
-				break
+				return
 			}
-			fmt.Println(line)
-			lastTimestamp = time.Now().Unix()
 		}
+	}
 
-		if err := scanner.Err(); err != nil {
-			log.Fatalf("Error reading logs: %v", err)
-			time.Sleep(2 * time.Second)
-		} else {
-			log.Println("Log stream closed normally, reconnecting...")
-			time.Sleep(1 * time.Second)
-		}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Scann failed: %v\n", err)
+		time.Sleep(1 * time.Second)
+		return
 	}
 }
