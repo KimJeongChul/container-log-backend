@@ -1,5 +1,5 @@
 package model
 
-type ResMsg struct {
-	Msg string `json:"msg"`
+type Msg struct {
+	Msg string `json:"msg,omitempty"`
 }
