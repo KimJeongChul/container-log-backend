@@ -32,10 +32,13 @@ func New(dockerClient *client.Client) *gin.Engine {
 
 	gin.SetMode(gin.ReleaseMode)
 
+	apiv1 := router.Group("/api/v1")
+
 	containerAPI := v1.ContaienrAPI{DockerClient: dockerClient}
 	logSocketAPI := v1.LogSocketAPI{DockerClient: dockerClient}
-	
-	router.GET("/containers", containerAPI.ListDockerContainers)
-	router.GET("/logs/:container_id", logSocketAPI.LogContainer)
+
+	apiv1.GET("/containers", containerAPI.ListDockerContainers)
+	apiv1.GET("/logs/:container_id", logSocketAPI.LogContainer)
+
 	return router
 }
